@@ -10,13 +10,12 @@ from keras.optimizers import Adam
 import matplotlib.pyplot as plt
 
 # -- constants
-ENV = 'CartPole-v0'
+ENV = 'CartPole-v1'
 
-EPISODES = 2000
+EPISODES = 5000
 RENDER=False
 
-LOSS_PENALTY=0.5 # Weight to give to loss prediction
-ENTROPY_PENALTY=0.001
+ENTROPY_PENALTY=0.005
 LOSS_CLIPPING=0.2 # Only implemented clipping for the surrogate loss, paper said it was best
 SIGMA_INIT=0.02 # For the noisy net
 EPOCHS=10
@@ -35,7 +34,7 @@ def exponential_average(old, new, b1):
 def value_loss():
     def val_loss(y_true, y_pred):
         advantage = y_true - y_pred
-        return K.mean(LOSS_PENALTY * K.square(advantage))
+        return K.mean(K.square(advantage))
     return val_loss
 
 def proximal_policy_optimization_loss(actual_value, old_prediction, predicted_value):
@@ -44,48 +43,57 @@ def proximal_policy_optimization_loss(actual_value, old_prediction, predicted_va
         prob = K.sum(y_pred * y_true, axis=1, keepdims=True) + 1e-10
         old_prob = K.sum(old_prediction * y_true, axis=1, keepdims=True) + 1e-10
         r = prob/old_prob
-        entropy = -K.mean(prob * K.log(prob))
-        return -K.mean(K.minimum(r * advantage, K.clip(r, min_value=1-LOSS_CLIPPING, max_value=1+LOSS_CLIPPING) * advantage)) + ENTROPY_PENALTY * entropy
+        # entropy = K.mean(prob * K.log(prob))
+        return -K.mean(K.minimum(r * advantage, K.clip(r, min_value=1-LOSS_CLIPPING, max_value=1+LOSS_CLIPPING) * advantage))# - ENTROPY_PENALTY * entropy
     return loss
 
 
 class Agent:
 
     def __init__(self):
-        self.model = self._build_model()
+        self.critic = self.build_critic()
+        self.actor = self.build_actor()
         self.env = gym.make(ENV)
         self.episode = 0
         self.observation = self.env.reset()
         self.reward = []
         self.reward_over_time = []
 
-    def _build_model(self):
+    def build_actor(self):
 
         state_input = Input(shape=(NUM_STATE,))
         actual_value = Input(shape=(1,))
+        predicted_value = Input(shape=(1,))
         old_prediction = Input(shape=(NUM_ACTIONS,))
 
-        x = Dense(64, activation='relu')(state_input)
-        # x = Dropout(0.5)(x)
-        # x = Dense(64, activation='relu')(x)
-        # x = Dropout(0.5)(x)
+        x = Dense(128, activation='relu')(state_input)
 
-        out_value = NoisyDense(1, name='out_value', sigma_init=SIGMA_INIT)(x)
-        out_actions = NoisyDense(NUM_ACTIONS, activation='softmax', name='out_actions', sigma_init=SIGMA_INIT)(x)
+        out_actions = Dense(NUM_ACTIONS, activation='softmax', name='out_actions')(x)
 
-        model = Model(inputs=[state_input, actual_value, old_prediction], outputs=[out_actions, out_value, actual_value, old_prediction])
+        model = Model(inputs=[state_input, actual_value, predicted_value, old_prediction], outputs=[out_actions])
         model.compile(optimizer=Adam(),
-                      loss=[proximal_policy_optimization_loss(actual_value=actual_value, old_prediction=old_prediction, predicted_value=out_value),
-                            value_loss(),
-                            'mae',
-                            'mae'])
+                      loss=[proximal_policy_optimization_loss(
+                          actual_value=actual_value,
+                          old_prediction=old_prediction,
+                          predicted_value=predicted_value)])
 
-        model.summary()
+        return model
+
+    def build_critic(self):
+
+        state_input = Input(shape=(NUM_STATE,))
+        x = Dense(128, activation='relu')(state_input)
+
+        out_value = Dense(1)(x)
+
+        model = Model(inputs=[state_input], outputs=[out_value])
+        model.compile(optimizer=Adam(), loss='mse')
+
         return model
 
 
-    def print_average_weight(self):
-        return np.mean(self.model.get_layer('out_actions').get_weights()[1])
+    # def print_average_weight(self):
+    #     return np.mean(self.model.get_layer('out_actions').get_weights()[1])
 
 
     def reset_env(self):
@@ -94,24 +102,21 @@ class Agent:
         self.reward = []
 
     def get_action(self):
-        p, _, _, _ = self.model.predict([self.observation.reshape(1, NUM_STATE), DUMMY_VALUE, DUMMY_ACTION])
+        p = self.actor.predict([self.observation.reshape(1, NUM_STATE), DUMMY_VALUE, DUMMY_VALUE, DUMMY_ACTION])
         action = np.random.choice(NUM_ACTIONS, p=p[0])
         action_matrix = np.zeros((p[0].shape))
         action_matrix[action] = 1
 
         return action, action_matrix, p
 
-
-    # All kinds of fucked up, fix it
     def get_reward(self, index, length):
         reward = self.reward[-length + index]
-        # reward = -self.reward[-length + index] + self.reward[min(-length + index + TIMESTEP, len(self.reward)-1)]
         return reward
-    # All kinds of fucked up, fix it
+
     def transform_reward(self):
         if self.episode % 100 == 0:
             print('Episode # ', self.episode, 'finished with reward', np.array(self.reward).sum())
-            print('Average Random Weights',self.print_average_weight())
+            #print('Average Random Weights',self.print_average_weight())
         self.reward_over_time.append(np.array(self.reward).sum())
         for j in range(len(self.reward)):
             reward = self.reward[j]
@@ -154,10 +159,13 @@ class Agent:
         while self.episode < EPISODES:
             obs, action, pred, reward = self.get_batch()
             old_prediction = pred
+            pred_values = self.critic.predict(obs)
             for e in range(EPOCHS):
-                self.model.train_on_batch([obs, reward, old_prediction], [action, reward, reward, old_prediction])
-            self.model.get_layer('out_actions').sample_noise()
-            self.model.get_layer('out_value').sample_noise()
+                self.actor.train_on_batch([obs, reward, pred_values, old_prediction], [action])
+            for e in range(EPOCHS):
+                self.critic.train_on_batch([obs], [reward])
+            # self.model.get_layer('out_actions').sample_noise()
+            # self.model.get_layer('out_value').sample_noise()
 
 if __name__ == '__main__':
     ag = Agent()
