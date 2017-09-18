@@ -10,7 +10,7 @@ from keras.optimizers import Adam
 import matplotlib.pyplot as plt
 
 # -- constants
-ENV = 'CartPole-v1'
+ENV = 'Breakout-ram-v0'
 
 EPISODES = 5000
 RENDER=False
@@ -22,9 +22,9 @@ EPOCHS=10
 
 GAMMA = 0.9
 
-BATCH_SIZE = 32
-NUM_ACTIONS=2
-NUM_STATE = 4
+BATCH_SIZE = 64
+NUM_ACTIONS = 4
+NUM_STATE = 128
 
 DUMMY_ACTION, DUMMY_VALUE = np.zeros((1, NUM_ACTIONS)), np.zeros((1,1))
 
@@ -37,16 +37,21 @@ def value_loss():
         return K.mean(K.square(advantage))
     return val_loss
 
-def proximal_policy_optimization_loss(actual_value, old_prediction, predicted_value):
+def normal_log_density(x, policy):
+    var = K.pow(K.std(policy), 2)
+    log_density = -K.pow(x - K.mean(policy), 2) / (2 * var) - 0.5 * K.log(2 * math.pi) - K.log(K.std(policy))
+    return K.sum(log_density)
+
+def proximal_policy_optimization_loss(actual_value, predicted_value, old_prediction):
     advantage = actual_value - predicted_value
     def loss(y_true, y_pred):
-        prob = K.sum(y_pred * y_true, axis=1, keepdims=True) + 1e-10
-        old_prob = K.sum(old_prediction * y_true, axis=1, keepdims=True) + 1e-10
-        r = prob/old_prob
-        # entropy = K.mean(prob * K.log(prob))
-        return -K.mean(K.minimum(r * advantage, K.clip(r, min_value=1-LOSS_CLIPPING, max_value=1+LOSS_CLIPPING) * advantage))# - ENTROPY_PENALTY * entropy
-    return loss
+        prob = normal_log_density(y_pred, y_true)
+        old_prob = normal_log_density(y_pred, old_prediction)
 
+        r = prob/old_prob
+
+        return K.mean(K.minimum(r * advantage, K.clip(r, min_value=0.8, max_value=1.2) * advantage))
+    return loss
 
 class Agent:
 
@@ -54,6 +59,7 @@ class Agent:
         self.critic = self.build_critic()
         self.actor = self.build_actor()
         self.env = gym.make(ENV)
+        print(self.env.action_space, 'action_space', self.env.observation_space, 'observation_space')
         self.episode = 0
         self.observation = self.env.reset()
         self.reward = []
@@ -66,9 +72,10 @@ class Agent:
         predicted_value = Input(shape=(1,))
         old_prediction = Input(shape=(NUM_ACTIONS,))
 
-        x = Dense(128, activation='relu')(state_input)
+        x = Dense(256, activation='relu')(state_input)
+        x = Dense(256, activation='relu')(x)
 
-        out_actions = Dense(NUM_ACTIONS, activation='softmax', name='out_actions')(x)
+        out_actions = NoisyDense(NUM_ACTIONS, activation='softmax', name='out_actions', sigma_init=SIGMA_INIT)(x)
 
         model = Model(inputs=[state_input, actual_value, predicted_value, old_prediction], outputs=[out_actions])
         model.compile(optimizer=Adam(),
@@ -82,7 +89,8 @@ class Agent:
     def build_critic(self):
 
         state_input = Input(shape=(NUM_STATE,))
-        x = Dense(128, activation='relu')(state_input)
+        x = Dense(256, activation='relu')(state_input)
+        x = Dense(256, activation='relu')(x)
 
         out_value = Dense(1)(x)
 
@@ -92,8 +100,8 @@ class Agent:
         return model
 
 
-    # def print_average_weight(self):
-    #     return np.mean(self.model.get_layer('out_actions').get_weights()[1])
+    def print_average_weight(self):
+        return np.mean(self.actor.get_layer('out_actions').get_weights()[1])
 
 
     def reset_env(self):
@@ -116,7 +124,9 @@ class Agent:
     def transform_reward(self):
         if self.episode % 100 == 0:
             print('Episode # ', self.episode, 'finished with reward', np.array(self.reward).sum())
-            #print('Average Random Weights',self.print_average_weight())
+            print('Average Random Weights',self.print_average_weight())
+            self.actor.save_weights('actor')
+            self.critic.save_weights('critic')
         self.reward_over_time.append(np.array(self.reward).sum())
         for j in range(len(self.reward)):
             reward = self.reward[j]
@@ -164,7 +174,7 @@ class Agent:
                 self.actor.train_on_batch([obs, reward, pred_values, old_prediction], [action])
             for e in range(EPOCHS):
                 self.critic.train_on_batch([obs], [reward])
-            # self.model.get_layer('out_actions').sample_noise()
+            self.actor.get_layer('out_actions').sample_noise()
             # self.model.get_layer('out_value').sample_noise()
 
 if __name__ == '__main__':
