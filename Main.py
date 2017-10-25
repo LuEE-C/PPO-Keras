@@ -5,9 +5,9 @@ import gym
 from keras.models import Model
 from keras.layers import Input, Dense, Dropout
 from keras import backend as K
-from NoisyDense import NoisyDense
 from keras.optimizers import Adam
 import matplotlib.pyplot as plt
+import numba
 
 # -- constants
 ENV = 'Breakout-ram-v0'
@@ -17,10 +17,9 @@ RENDER=False
 
 ENTROPY_PENALTY=0.005
 LOSS_CLIPPING=0.2 # Only implemented clipping for the surrogate loss, paper said it was best
-SIGMA_INIT=0.02 # For the noisy net
 EPOCHS=10
 
-GAMMA = 0.9
+GAMMA = 0.95
 
 BATCH_SIZE = 64
 NUM_ACTIONS = 4
@@ -31,26 +30,15 @@ DUMMY_ACTION, DUMMY_VALUE = np.zeros((1, NUM_ACTIONS)), np.zeros((1,1))
 def exponential_average(old, new, b1):
     return old * b1 + (1-b1) * new
 
-def value_loss():
-    def val_loss(y_true, y_pred):
-        advantage = y_true - y_pred
-        return K.mean(K.square(advantage))
-    return val_loss
-
-def normal_log_density(x, policy):
-    var = K.pow(K.std(policy), 2)
-    log_density = -K.pow(x - K.mean(policy), 2) / (2 * var) - 0.5 * K.log(2 * math.pi) - K.log(K.std(policy))
-    return K.sum(log_density)
-
 def proximal_policy_optimization_loss(actual_value, predicted_value, old_prediction):
     advantage = actual_value - predicted_value
     def loss(y_true, y_pred):
-        prob = normal_log_density(y_pred, y_true)
-        old_prob = normal_log_density(y_pred, old_prediction)
+        prob = K.sum(y_true * y_pred, axis=1, keepdims=True)
+        old_prob = K.sum(y_true * old_prediction, axis=1, keepdims=True)
 
-        r = prob/old_prob
+        r = prob/(old_prob + 1e-10)
 
-        return K.mean(K.minimum(r * advantage, K.clip(r, min_value=0.8, max_value=1.2) * advantage))
+        return -K.log(prob + 1e-10) * K.mean(K.minimum(r * advantage, K.clip(r, min_value=0.8, max_value=1.2) * advantage))
     return loss
 
 class Agent:
@@ -72,10 +60,9 @@ class Agent:
         predicted_value = Input(shape=(1,))
         old_prediction = Input(shape=(NUM_ACTIONS,))
 
-        x = Dense(256, activation='relu')(state_input)
-        x = Dense(256, activation='relu')(x)
+        x = Dense(64, activation='relu')(state_input)
 
-        out_actions = NoisyDense(NUM_ACTIONS, activation='softmax', name='out_actions', sigma_init=SIGMA_INIT)(x)
+        out_actions = Dense(NUM_ACTIONS, activation='softmax')(x)
 
         model = Model(inputs=[state_input, actual_value, predicted_value, old_prediction], outputs=[out_actions])
         model.compile(optimizer=Adam(),
@@ -89,8 +76,7 @@ class Agent:
     def build_critic(self):
 
         state_input = Input(shape=(NUM_STATE,))
-        x = Dense(256, activation='relu')(state_input)
-        x = Dense(256, activation='relu')(x)
+        x = Dense(64, activation='relu')(state_input)
 
         out_value = Dense(1)(x)
 
@@ -99,34 +85,28 @@ class Agent:
 
         return model
 
-
-    def print_average_weight(self):
-        return np.mean(self.actor.get_layer('out_actions').get_weights()[1])
-
-
+    @numba.jit
     def reset_env(self):
         self.episode += 1
         self.observation = self.env.reset()
         self.reward = []
 
+    @numba.jit
     def get_action(self):
         p = self.actor.predict([self.observation.reshape(1, NUM_STATE), DUMMY_VALUE, DUMMY_VALUE, DUMMY_ACTION])
-        action = np.random.choice(NUM_ACTIONS, p=p[0])
+        action = np.random.choice(NUM_ACTIONS, p=np.nan_to_num(p[0]))
         action_matrix = np.zeros((p[0].shape))
         action_matrix[action] = 1
 
         return action, action_matrix, p
 
-    def get_reward(self, index, length):
-        reward = self.reward[-length + index]
-        return reward
 
     def transform_reward(self):
         if self.episode % 100 == 0:
             print('Episode # ', self.episode, 'finished with reward', np.array(self.reward).sum())
-            print('Average Random Weights',self.print_average_weight())
-            self.actor.save_weights('actor')
-            self.critic.save_weights('critic')
+            # print('Average Random Weights',self.print_average_weight())
+            # self.actor.save_weights('actor')
+            # self.critic.save_weights('critic')
         self.reward_over_time.append(np.array(self.reward).sum())
         for j in range(len(self.reward)):
             reward = self.reward[j]
@@ -174,8 +154,6 @@ class Agent:
                 self.actor.train_on_batch([obs, reward, pred_values, old_prediction], [action])
             for e in range(EPOCHS):
                 self.critic.train_on_batch([obs], [reward])
-            self.actor.get_layer('out_actions').sample_noise()
-            # self.model.get_layer('out_value').sample_noise()
 
 if __name__ == '__main__':
     ag = Agent()
