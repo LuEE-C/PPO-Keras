@@ -1,6 +1,7 @@
 from keras import backend as K
 from keras.engine.topology import Layer
 from keras import activations, initializers, regularizers, constraints
+import numpy as np
 
 class NoisyDense(Layer):
 
@@ -45,7 +46,14 @@ class NoisyDense(Layer):
                                       initializer=initializers.Constant(value=self.sigma_init),
                                       name='sigma_kernel'
                                       )
-
+        self.epsilon_kernel = self.add_weight(shape=(self.input_dim, self.units),
+                                              initializer=self.kernel_initializer,
+                                              trainable=False,
+                                              name='epsilon_kernel')
+        self.epsilon_bias = self.add_weight(shape=(self.units,),
+                                            initializer=self.kernel_initializer,
+                                            trainable=False,
+                                            name='epsilon_bias')
 
         if self.use_bias:
             self.bias = self.add_weight(shape=(self.units,),
@@ -59,7 +67,7 @@ class NoisyDense(Layer):
         else:
             self.bias = None
             self.epsilon_bias = None
-        self.sample_noise()
+        # self.sample_noise()
         super(NoisyDense, self).build(input_shape)
 
 
@@ -83,10 +91,30 @@ class NoisyDense(Layer):
         return tuple(output_shape)
 
     def sample_noise(self):
-
-        self.epsilon_kernel = K.random_normal(shape=(self.input_dim, self.units), mean=0, stddev=1)
-        self.epsilon_bias = K.random_normal(shape=(self.units,), mean=0, stddev=1)
+        K.set_value(self.epsilon_kernel, np.random.normal(loc=0, scale=1, size=(self.input_dim, self.units)))
+        K.set_value(self.epsilon_bias, np.random.normal(loc=0, scale=1, size=(self.units,)))
 
     def remove_noise(self):
-        self.epsilon_kernel = K.zeros(shape=(self.input_dim, self.units))
-        self.epsilon_bias = K.zeros(shape=(self.units,))
+        K.set_value(self.epsilon_kernel, np.zeros(shape=(self.input_dim, self.units)))
+        K.set_value(self.epsilon_bias, np.zeros(shape=(self.units,)))
+
+    def get_config(self):
+        config = {
+            'units': self.units,
+            'sigma_init': self.sigma_init,
+            'sigma_kernel': self.sigma_kernel,
+            'sigma_bias': self.sigma_bias,
+            'epsilon_bias': self.epsilon_bias,
+            'epsilon_kernel': self.epsilon_kernel,
+            'activation': activations.serialize(self.activation),
+            'use_bias': self.use_bias,
+            'kernel_initializer': initializers.serialize(self.kernel_initializer),
+            'bias_initializer': initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'activity_regularizer': regularizers.serialize(self.activity_regularizer),
+            'kernel_constraint': constraints.serialize(self.kernel_constraint),
+            'bias_constraint': constraints.serialize(self.bias_constraint)
+        }
+        base_config = super(NoisyDense, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))
