@@ -12,8 +12,7 @@ from keras.optimizers import Adam
 import matplotlib.pyplot as plt
 import numba as nb
 
-# ENV = 'Breakout-ram-v0'
-ENV = 'CartPole-v1'
+ENV = 'Breakout-ram-v0'
 
 EPISODES = 10000
 
