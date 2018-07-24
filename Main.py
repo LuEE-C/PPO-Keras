@@ -12,20 +12,24 @@ from keras.optimizers import Adam
 import matplotlib.pyplot as plt
 import numba as nb
 
-ENV = 'Breakout-ram-v0'
+# ENV = 'Breakout-ram-v0'
+ENV = 'CartPole-v1'
 
 EPISODES = 10000
 
 LOSS_CLIPPING = 0.2 # Only implemented clipping for the surrogate loss, paper said it was best
-EPOCHS = 10
+EPOCHS = 20
 
 GAMMA = 0.99
 
-BATCH_SIZE = 512
+BATCH_SIZE = 16
 NUM_ACTIONS = 4
 NUM_STATE = 128
+HIDDEN_SIZE = 256
+ENTROPY_LOSS = 10e-3 # Does not converge without entropy penalty
+LR = 5*10e-5 # Lower lr stabilises training greatly
 
-DUMMY_ACTION, DUMMY_VALUE = np.zeros((1, NUM_ACTIONS)), np.zeros((1,1))
+DUMMY_ACTION, DUMMY_VALUE = np.zeros((1, NUM_ACTIONS)), np.zeros((1, 1))
 
 
 @nb.jit
@@ -41,7 +45,7 @@ def proximal_policy_optimization_loss(actual_value, predicted_value, old_predict
         old_prob = K.sum(y_true * old_prediction)
         r = prob/(old_prob + 1e-10)
 
-        return -K.log(prob + 1e-10) * K.mean(K.minimum(r * advantage, K.clip(r, min_value=0.8, max_value=1.2) * advantage))
+        return -K.log(prob + 1e-10) * K.mean(K.minimum(r * advantage, K.clip(r, min_value=0.8, max_value=1.2) * advantage)) + ENTROPY_LOSS * (prob * K.log(prob + 1e-10))
     return loss
 
 class Agent:
@@ -63,14 +67,13 @@ class Agent:
         predicted_value = Input(shape=(1,))
         old_prediction = Input(shape=(NUM_ACTIONS,))
 
-        x = Dense(256, activation='relu')(state_input)
-        x = Dense(256, activation='relu')(x)
+        x = Dense(HIDDEN_SIZE, activation='relu')(state_input)
+        x = Dense(HIDDEN_SIZE, activation='relu')(x)
 
-        # Prefer this to entropy penalty
-        out_actions = NoisyDense(NUM_ACTIONS, activation='softmax', sigma_init=0.02, name='output')(x)
+        out_actions = NoisyDense(NUM_ACTIONS, activation='softmax', sigma_init=0.002, name='output')(x)
 
         model = Model(inputs=[state_input, actual_value, predicted_value, old_prediction], outputs=[out_actions])
-        model.compile(optimizer=Adam(lr=10e-4),
+        model.compile(optimizer=Adam(lr=LR),
                       loss=[proximal_policy_optimization_loss(
                           actual_value=actual_value,
                           old_prediction=old_prediction,
@@ -82,13 +85,13 @@ class Agent:
     def build_critic(self):
 
         state_input = Input(shape=(NUM_STATE,))
-        x = Dense(256, activation='relu')(state_input)
-        x = Dense(256, activation='relu')(x)
+        x = Dense(HIDDEN_SIZE, activation='relu')(state_input)
+        x = Dense(HIDDEN_SIZE, activation='relu')(x)
 
         out_value = Dense(1)(x)
 
         model = Model(inputs=[state_input], outputs=[out_value])
-        model.compile(optimizer=Adam(lr=10e-4), loss='mse')
+        model.compile(optimizer=Adam(lr=LR), loss='mse')
 
         return model
 
