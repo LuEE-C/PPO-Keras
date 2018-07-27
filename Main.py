@@ -6,27 +6,27 @@ import gym
 
 from NoisyDense import NoisyDense
 from keras.models import Model
-from keras.layers import Input, Dense
+from keras.layers import Input, Dense, Dropout
 from keras import backend as K
 from keras.optimizers import Adam
 import matplotlib.pyplot as plt
 import numba as nb
 
-ENV = 'Breakout-ram-v0'
+ENV = 'CartPole-v1'
 
 EPISODES = 10000
 
 LOSS_CLIPPING = 0.2 # Only implemented clipping for the surrogate loss, paper said it was best
-EPOCHS = 20
+EPOCHS = 10
 
 GAMMA = 0.99
 
-BATCH_SIZE = 16
-NUM_ACTIONS = 4
-NUM_STATE = 128
-HIDDEN_SIZE = 256
-ENTROPY_LOSS = 10e-3 # Does not converge without entropy penalty
-LR = 5*10e-5 # Lower lr stabilises training greatly
+BATCH_SIZE = 64
+NUM_ACTIONS = 2
+NUM_STATE = 4
+HIDDEN_SIZE = 64
+ENTROPY_LOSS = 5 * 1e-3 # Does not converge without entropy penalty
+LR = 1e-3 # Lower lr stabilises training greatly
 
 DUMMY_ACTION, DUMMY_VALUE = np.zeros((1, NUM_ACTIONS)), np.zeros((1, 1))
 
@@ -40,11 +40,11 @@ def proximal_policy_optimization_loss(actual_value, predicted_value, old_predict
     advantage = actual_value - predicted_value
 
     def loss(y_true, y_pred):
-        prob = K.sum(y_true * y_pred)
-        old_prob = K.sum(y_true * old_prediction)
+        prob = K.mean(K.sum(y_true * y_pred))
+        old_prob = K.mean(K.sum(y_true * old_prediction))
         r = prob/(old_prob + 1e-10)
 
-        return -K.log(prob + 1e-10) * K.mean(K.minimum(r * advantage, K.clip(r, min_value=0.8, max_value=1.2) * advantage)) + ENTROPY_LOSS * (prob * K.log(prob + 1e-10))
+        return -K.mean(K.minimum(r * advantage, K.clip(r, min_value=1 - LOSS_CLIPPING, max_value=1 + LOSS_CLIPPING) * advantage)) + ENTROPY_LOSS * (prob * K.log(prob + 1e-10))
     return loss
 
 class Agent:
@@ -52,6 +52,8 @@ class Agent:
     def __init__(self):
         self.critic = self.build_critic()
         self.actor = self.build_actor()
+
+        self.adv_over_time = []
         self.env = gym.make(ENV)
         print(self.env.action_space, 'action_space', self.env.observation_space, 'observation_space')
         self.episode = 0
@@ -67,8 +69,11 @@ class Agent:
         old_prediction = Input(shape=(NUM_ACTIONS,))
 
         x = Dense(HIDDEN_SIZE, activation='relu')(state_input)
+        x = Dropout(0.5)(x)
         x = Dense(HIDDEN_SIZE, activation='relu')(x)
+        x = Dropout(0.5)(x)
 
+        # out_actions = Dense(NUM_ACTIONS, activation='softmax', name='output')(x)
         out_actions = NoisyDense(NUM_ACTIONS, activation='softmax', sigma_init=0.002, name='output')(x)
 
         model = Model(inputs=[state_input, actual_value, predicted_value, old_prediction], outputs=[out_actions])
@@ -85,7 +90,9 @@ class Agent:
 
         state_input = Input(shape=(NUM_STATE,))
         x = Dense(HIDDEN_SIZE, activation='relu')(state_input)
+        x = Dropout(0.5)(x)
         x = Dense(HIDDEN_SIZE, activation='relu')(x)
+        x = Dropout(0.5)(x)
 
         out_value = Dense(1)(x)
 
@@ -161,6 +168,7 @@ class Agent:
                 self.actor.train_on_batch([obs, reward, pred_values, old_prediction], [action])
             for e in range(EPOCHS):
                 self.critic.train_on_batch([obs], [reward])
+
 
 if __name__ == '__main__':
     ag = Agent()
