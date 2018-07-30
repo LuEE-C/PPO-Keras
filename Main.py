@@ -11,22 +11,24 @@ from keras import backend as K
 from keras.optimizers import Adam
 import matplotlib.pyplot as plt
 import numba as nb
+from tensorboardX import SummaryWriter
 
-ENV = 'CartPole-v1'
+ENV = 'BipedalWalker-v2'
+CONTINUOUS = True
 
-EPISODES = 10000
+EPISODES = 1000000
 
 LOSS_CLIPPING = 0.2 # Only implemented clipping for the surrogate loss, paper said it was best
 EPOCHS = 10
 
 GAMMA = 0.99
 
-BATCH_SIZE = 64
-NUM_ACTIONS = 2
-NUM_STATE = 4
-HIDDEN_SIZE = 64
+BATCH_SIZE = 256
+NUM_ACTIONS = 4
+NUM_STATE = 24
+HIDDEN_SIZE = 256
 ENTROPY_LOSS = 5 * 1e-3 # Does not converge without entropy penalty
-LR = 1e-3 # Lower lr stabilises training greatly
+LR = 1e-4 # Lower lr stabilises training greatly
 
 DUMMY_ACTION, DUMMY_VALUE = np.zeros((1, NUM_ACTIONS)), np.zeros((1, 1))
 
@@ -36,9 +38,7 @@ def exponential_average(old, new, b1):
     return old * b1 + (1-b1) * new
 
 
-def proximal_policy_optimization_loss(actual_value, predicted_value, old_prediction):
-    advantage = actual_value - predicted_value
-
+def proximal_policy_optimization_loss(advantage, old_prediction):
     def loss(y_true, y_pred):
         prob = K.mean(K.sum(y_true * y_pred))
         old_prob = K.mean(K.sum(y_true * old_prediction))
@@ -47,25 +47,38 @@ def proximal_policy_optimization_loss(actual_value, predicted_value, old_predict
         return -K.mean(K.minimum(r * advantage, K.clip(r, min_value=1 - LOSS_CLIPPING, max_value=1 + LOSS_CLIPPING) * advantage)) + ENTROPY_LOSS * (prob * K.log(prob + 1e-10))
     return loss
 
-class Agent:
 
+def proximal_policy_optimization_loss_continuous(advantage, old_prediction):
+    def loss(y_true, y_pred):
+        prob = K.mean(K.square(y_true - y_pred))
+        old_prob = K.mean(K.square(y_true - old_prediction))
+        r = prob/(old_prob + 1e-10)
+
+        return K.mean(K.maximum(r * advantage, K.clip(r, min_value=1 - LOSS_CLIPPING, max_value=1 + LOSS_CLIPPING) * advantage))
+    return loss
+
+
+class Agent:
     def __init__(self):
         self.critic = self.build_critic()
-        self.actor = self.build_actor()
+        if CONTINUOUS is False:
+            self.actor = self.build_actor()
+        else:
+            self.actor = self.build_actor_continuous()
 
-        self.adv_over_time = []
         self.env = gym.make(ENV)
         print(self.env.action_space, 'action_space', self.env.observation_space, 'observation_space')
         self.episode = 0
         self.observation = self.env.reset()
         self.reward = []
         self.reward_over_time = []
+        self.writer = SummaryWriter('AllRuns/continuous')
+        self.gradient_steps = 0
 
     def build_actor(self):
 
         state_input = Input(shape=(NUM_STATE,))
-        actual_value = Input(shape=(1,))
-        predicted_value = Input(shape=(1,))
+        advantage = Input(shape=(1,))
         old_prediction = Input(shape=(NUM_ACTIONS,))
 
         x = Dense(HIDDEN_SIZE, activation='relu')(state_input)
@@ -74,14 +87,37 @@ class Agent:
         x = Dropout(0.5)(x)
 
         # out_actions = Dense(NUM_ACTIONS, activation='softmax', name='output')(x)
-        out_actions = NoisyDense(NUM_ACTIONS, activation='softmax', sigma_init=0.002, name='output')(x)
+        out_actions = Dense(NUM_ACTIONS, activation='softmax', name='output')(x)
 
-        model = Model(inputs=[state_input, actual_value, predicted_value, old_prediction], outputs=[out_actions])
+        model = Model(inputs=[state_input, advantage, old_prediction], outputs=[out_actions])
         model.compile(optimizer=Adam(lr=LR),
                       loss=[proximal_policy_optimization_loss(
-                          actual_value=actual_value,
-                          old_prediction=old_prediction,
-                          predicted_value=predicted_value)])
+                          advantage=advantage,
+                          old_prediction=old_prediction)])
+        model.summary()
+
+        return model
+
+
+    def build_actor_continuous(self):
+
+        state_input = Input(shape=(NUM_STATE,))
+        advantage = Input(shape=(1,))
+        old_prediction = Input(shape=(NUM_ACTIONS,))
+
+        x = Dense(HIDDEN_SIZE, activation='relu')(state_input)
+        x = Dropout(0.5)(x)
+        x = Dense(HIDDEN_SIZE, activation='relu')(x)
+        x = Dropout(0.5)(x)
+
+        # out_actions = Dense(NUM_ACTIONS, activation='softmax', name='output')(x)
+        out_actions = NoisyDense(NUM_ACTIONS, sigma_init=0.002, name='output')(x)
+
+        model = Model(inputs=[state_input, advantage, old_prediction], outputs=[out_actions])
+        model.compile(optimizer=Adam(lr=LR),
+                      loss=[proximal_policy_optimization_loss_continuous(
+                          advantage=advantage,
+                          old_prediction=old_prediction)])
         model.summary()
 
         return model
@@ -109,18 +145,26 @@ class Agent:
 
     @nb.jit
     def get_action(self):
-        p = self.actor.predict([self.observation.reshape(1, NUM_STATE), DUMMY_VALUE, DUMMY_VALUE, DUMMY_ACTION])
+        p = self.actor.predict([self.observation.reshape(1, NUM_STATE), DUMMY_VALUE, DUMMY_ACTION])
         action = np.random.choice(NUM_ACTIONS, p=np.nan_to_num(p[0]))
         action_matrix = np.zeros(p[0].shape)
         action_matrix[action] = 1
         return action, action_matrix, p
 
     @nb.jit
+    def get_action_continuous(self):
+        p = self.actor.predict([self.observation.reshape(1, NUM_STATE), DUMMY_VALUE, DUMMY_ACTION])
+        action = action_matrix = p[0] + np.random.normal(scale=0.01, size=p[0].shape)
+        return action, action_matrix, p
+
+    @nb.jit
     def transform_reward(self):
         if self.episode % 100 == 0:
             print('Episode #', self.episode, '\tfinished with reward', np.array(self.reward).sum(),
-                  '\tAverage Noisy Weights', np.mean(self.actor.get_layer('output').get_weights()[1]))
+                  '\tAverage Noisy Weights', np.mean(self.actor.get_layer('output').get_weights()[1]),
+                  '\tAverage reward of last 100 episode :', np.mean(self.reward_over_time[-100:]))
         self.reward_over_time.append(np.array(self.reward).sum())
+        self.writer.add_scalar('Episode reward', np.array(self.reward).sum(), self.episode)
         for j in range(len(self.reward)):
             reward = self.reward[j]
             for k in range(j + 1, len(self.reward)):
@@ -133,7 +177,10 @@ class Agent:
 
         tmp_batch = [[], [], []]
         while len(batch[0]) < BATCH_SIZE:
-            action, action_matrix, predicted_action = self.get_action()
+            if CONTINUOUS is False:
+                action, action_matrix, predicted_action = self.get_action()
+            else:
+                action, action_matrix, predicted_action = self.get_action_continuous()
             observation, reward, done, info = self.env.step(action)
             self.reward.append(reward)
 
@@ -164,19 +211,19 @@ class Agent:
             old_prediction = pred
             pred_values = self.critic.predict(obs)
 
+            advantage = reward - pred_values
+
+            actor_loss = []
+            critic_loss = []
             for e in range(EPOCHS):
-                self.actor.train_on_batch([obs, reward, pred_values, old_prediction], [action])
-            for e in range(EPOCHS):
-                self.critic.train_on_batch([obs], [reward])
+                actor_loss.append(self.actor.train_on_batch([obs, advantage, old_prediction], [action]))
+                critic_loss.append(self.critic.train_on_batch([obs], [reward]))
+            self.writer.add_scalar('Actor loss', np.mean(actor_loss), self.gradient_steps)
+            self.writer.add_scalar('Critic loss', np.mean(critic_loss), self.gradient_steps)
+
+            self.gradient_steps += 1
 
 
 if __name__ == '__main__':
     ag = Agent()
     ag.run()
-    old, ma_list = 0, []
-    for value in ag.reward_over_time:
-        old = exponential_average(old, value, .99)
-        ma_list.append(old)
-
-    plt.plot(ma_list)
-    plt.show()
