@@ -4,12 +4,11 @@ import numpy as np
 
 import gym
 
-from NoisyDense import NoisyDense
 from keras.models import Model
 from keras.layers import Input, Dense, Dropout
 from keras import backend as K
 from keras.optimizers import Adam
-import matplotlib.pyplot as plt
+
 import numba as nb
 from tensorboardX import SummaryWriter
 
@@ -20,6 +19,7 @@ EPISODES = 1000000
 
 LOSS_CLIPPING = 0.2 # Only implemented clipping for the surrogate loss, paper said it was best
 EPOCHS = 10
+NOISE = 0.01
 
 GAMMA = 0.99
 
@@ -50,11 +50,17 @@ def proximal_policy_optimization_loss(advantage, old_prediction):
 
 def proximal_policy_optimization_loss_continuous(advantage, old_prediction):
     def loss(y_true, y_pred):
-        prob = K.mean(K.square(y_true - y_pred))
-        old_prob = K.mean(K.square(y_true - old_prediction))
+        var = K.square(NOISE)
+        pi = 3.1415926
+        denom = K.sqrt(2 * pi * var)
+        prob_num = K.exp(- K.square(y_true - y_pred)/ (2 * var))
+        old_prob_num = K.exp(- K.square(y_true - old_prediction)/ (2 * var))
+
+        prob = K.mean(prob_num/denom)
+        old_prob = K.mean(old_prob_num/denom)
         r = prob/(old_prob + 1e-10)
 
-        return K.mean(K.maximum(r * advantage, K.clip(r, min_value=1 - LOSS_CLIPPING, max_value=1 + LOSS_CLIPPING) * advantage))
+        return -K.mean(K.minimum(r * advantage, K.clip(r, min_value=1 - LOSS_CLIPPING, max_value=1 + LOSS_CLIPPING) * advantage))
     return loss
 
 
@@ -86,7 +92,6 @@ class Agent:
         x = Dense(HIDDEN_SIZE, activation='relu')(x)
         x = Dropout(0.5)(x)
 
-        # out_actions = Dense(NUM_ACTIONS, activation='softmax', name='output')(x)
         out_actions = Dense(NUM_ACTIONS, activation='softmax', name='output')(x)
 
         model = Model(inputs=[state_input, advantage, old_prediction], outputs=[out_actions])
@@ -98,9 +103,7 @@ class Agent:
 
         return model
 
-
     def build_actor_continuous(self):
-
         state_input = Input(shape=(NUM_STATE,))
         advantage = Input(shape=(1,))
         old_prediction = Input(shape=(NUM_ACTIONS,))
@@ -110,8 +113,7 @@ class Agent:
         x = Dense(HIDDEN_SIZE, activation='relu')(x)
         x = Dropout(0.5)(x)
 
-        # out_actions = Dense(NUM_ACTIONS, activation='softmax', name='output')(x)
-        out_actions = NoisyDense(NUM_ACTIONS, sigma_init=0.002, name='output')(x)
+        out_actions = Dense(NUM_ACTIONS, name='output')(x)
 
         model = Model(inputs=[state_input, advantage, old_prediction], outputs=[out_actions])
         model.compile(optimizer=Adam(lr=LR),
@@ -154,22 +156,18 @@ class Agent:
     @nb.jit
     def get_action_continuous(self):
         p = self.actor.predict([self.observation.reshape(1, NUM_STATE), DUMMY_VALUE, DUMMY_ACTION])
-        action = action_matrix = p[0] + np.random.normal(scale=0.01, size=p[0].shape)
+        action = action_matrix = p[0] + np.random.normal(loc=0, scale=NOISE, size=p[0].shape)
         return action, action_matrix, p
 
     @nb.jit
     def transform_reward(self):
         if self.episode % 100 == 0:
             print('Episode #', self.episode, '\tfinished with reward', np.array(self.reward).sum(),
-                  '\tAverage Noisy Weights', np.mean(self.actor.get_layer('output').get_weights()[1]),
                   '\tAverage reward of last 100 episode :', np.mean(self.reward_over_time[-100:]))
         self.reward_over_time.append(np.array(self.reward).sum())
         self.writer.add_scalar('Episode reward', np.array(self.reward).sum(), self.episode)
-        for j in range(len(self.reward)):
-            reward = self.reward[j]
-            for k in range(j + 1, len(self.reward)):
-                reward += self.reward[k] * GAMMA ** k
-            self.reward[j] = reward
+        for j in range(len(self.reward) -1, -1, -1):
+            self.reward[j] += self.reward[j + 1] * GAMMA
 
     @nb.jit
     def get_batch(self):
