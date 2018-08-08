@@ -40,8 +40,8 @@ def exponential_average(old, new, b1):
 
 def proximal_policy_optimization_loss(advantage, old_prediction):
     def loss(y_true, y_pred):
-        prob = K.mean(K.sum(y_true * y_pred))
-        old_prob = K.mean(K.sum(y_true * old_prediction))
+        prob = K.sum(y_true * y_pred)
+        old_prob = K.sum(y_true * old_prediction)
         r = prob/(old_prob + 1e-10)
 
         return -K.mean(K.minimum(r * advantage, K.clip(r, min_value=1 - LOSS_CLIPPING, max_value=1 + LOSS_CLIPPING) * advantage)) + ENTROPY_LOSS * (prob * K.log(prob + 1e-10))
@@ -56,8 +56,8 @@ def proximal_policy_optimization_loss_continuous(advantage, old_prediction):
         prob_num = K.exp(- K.square(y_true - y_pred)/ (2 * var))
         old_prob_num = K.exp(- K.square(y_true - old_prediction)/ (2 * var))
 
-        prob = K.mean(prob_num/denom)
-        old_prob = K.mean(old_prob_num/denom)
+        prob = prob_num/denom
+        old_prob = old_prob_num/denom
         r = prob/(old_prob + 1e-10)
 
         return -K.mean(K.minimum(r * advantage, K.clip(r, min_value=1 - LOSS_CLIPPING, max_value=1 + LOSS_CLIPPING) * advantage))
