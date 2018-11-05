@@ -8,24 +8,25 @@ from keras.models import Model
 from keras.layers import Input, Dense, Dropout
 from keras import backend as K
 from keras.optimizers import Adam
+import random
 
 import numba as nb
 from tensorboardX import SummaryWriter
 
-ENV = 'BipedalWalker-v2'
+ENV = 'LunarLanderContinuous-v2'
 CONTINUOUS = True
 
 EPISODES = 1000000
 
 LOSS_CLIPPING = 0.2 # Only implemented clipping for the surrogate loss, paper said it was best
 EPOCHS = 10
-NOISE = 0.01
+NOISE = 1.0
 
 GAMMA = 0.99
 
 BATCH_SIZE = 256
-NUM_ACTIONS = 4
-NUM_STATE = 24
+NUM_ACTIONS = 2
+NUM_STATE = 8
 HIDDEN_SIZE = 256
 ENTROPY_LOSS = 5 * 1e-3 # Does not converge without entropy penalty
 LR = 1e-4 # Lower lr stabilises training greatly
@@ -53,8 +54,8 @@ def proximal_policy_optimization_loss_continuous(advantage, old_prediction):
         var = K.square(NOISE)
         pi = 3.1415926
         denom = K.sqrt(2 * pi * var)
-        prob_num = K.exp(- K.square(y_true - y_pred)/ (2 * var))
-        old_prob_num = K.exp(- K.square(y_true - old_prediction)/ (2 * var))
+        prob_num = K.exp(- K.square(y_true - y_pred) / (2 * var))
+        old_prob_num = K.exp(- K.square(y_true - old_prediction) / (2 * var))
 
         prob = prob_num/denom
         old_prob = old_prob_num/denom
@@ -76,9 +77,10 @@ class Agent:
         print(self.env.action_space, 'action_space', self.env.observation_space, 'observation_space')
         self.episode = 0
         self.observation = self.env.reset()
+        self.val = False
         self.reward = []
         self.reward_over_time = []
-        self.writer = SummaryWriter('AllRuns/continuous')
+        self.writer = SummaryWriter('AllRuns/continuous/lunar_lander_v2_no_dropout')
         self.gradient_steps = 0
 
     def build_actor(self):
@@ -109,11 +111,9 @@ class Agent:
         old_prediction = Input(shape=(NUM_ACTIONS,))
 
         x = Dense(HIDDEN_SIZE, activation='relu')(state_input)
-        x = Dropout(0.5)(x)
         x = Dense(HIDDEN_SIZE, activation='relu')(x)
-        x = Dropout(0.5)(x)
 
-        out_actions = Dense(NUM_ACTIONS, name='output')(x)
+        out_actions = Dense(NUM_ACTIONS, name='output', activation='tanh')(x)
 
         model = Model(inputs=[state_input, advantage, old_prediction], outputs=[out_actions])
         model.compile(optimizer=Adam(lr=LR),
@@ -139,37 +139,44 @@ class Agent:
 
         return model
 
-    @nb.jit
     def reset_env(self):
         self.episode += 1
+        if self.episode % 100 == 0:
+            self.val = True
+        else:
+            self.val = False
         self.observation = self.env.reset()
         self.reward = []
 
-    @nb.jit
     def get_action(self):
         p = self.actor.predict([self.observation.reshape(1, NUM_STATE), DUMMY_VALUE, DUMMY_ACTION])
-        action = np.random.choice(NUM_ACTIONS, p=np.nan_to_num(p[0]))
-        action_matrix = np.zeros(p[0].shape)
+        if self.val is False:
+            if random.random() < .4:
+                action = random.randint(0, NUM_ACTIONS - 1)
+            else:
+                action = np.argmax(np.nan_to_num(p[0]))
+        else:
+            action = np.argmax(np.nan_to_num(p[0]))
+        action_matrix = np.zeros(NUM_ACTIONS)
         action_matrix[action] = 1
         return action, action_matrix, p
 
-    @nb.jit
     def get_action_continuous(self):
         p = self.actor.predict([self.observation.reshape(1, NUM_STATE), DUMMY_VALUE, DUMMY_ACTION])
-        action = action_matrix = p[0] + np.random.normal(loc=0, scale=NOISE, size=p[0].shape)
+        if self.val is False:
+            action = action_matrix = p[0] + np.random.normal(loc=0, scale=NOISE, size=p[0].shape)
+        else:
+            action = action_matrix = p[0]
         return action, action_matrix, p
 
-    @nb.jit
     def transform_reward(self):
-        if self.episode % 100 == 0:
-            print('Episode #', self.episode, '\tfinished with reward', np.array(self.reward).sum(),
-                  '\tAverage reward of last 100 episode :', np.mean(self.reward_over_time[-100:]))
-        self.reward_over_time.append(np.array(self.reward).sum())
-        self.writer.add_scalar('Episode reward', np.array(self.reward).sum(), self.episode)
-        for j in range(len(self.reward) -1, -1, -1):
+        if self.val is True:
+            self.writer.add_scalar('Val episode reward', np.array(self.reward).sum(), self.episode)
+        else:
+            self.writer.add_scalar('Episode reward', np.array(self.reward).sum(), self.episode)
+        for j in range(len(self.reward) - 2, -1, -1):
             self.reward[j] += self.reward[j + 1] * GAMMA
 
-    @nb.jit
     def get_batch(self):
         batch = [[], [], [], []]
 
