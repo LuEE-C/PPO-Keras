@@ -5,30 +5,31 @@ import numpy as np
 import gym
 
 from keras.models import Model
-from keras.layers import Input, Dense, Dropout
+from keras.layers import Input, Dense
 from keras import backend as K
 from keras.optimizers import Adam
-import random
 
 import numba as nb
 from tensorboardX import SummaryWriter
 
-ENV = 'LunarLanderContinuous-v2'
-CONTINUOUS = True
+ENV = 'LunarLander-v2'
+CONTINUOUS = False
 
-EPISODES = 1000000
+EPISODES = 100000
 
 LOSS_CLIPPING = 0.2 # Only implemented clipping for the surrogate loss, paper said it was best
 EPOCHS = 10
-NOISE = 1.0
+NOISE = 1.0 # Exploration noise
 
 GAMMA = 0.99
 
-BATCH_SIZE = 256
-NUM_ACTIONS = 2
+BUFFER_SIZE = 256
+BATCH_SIZE = 64
+NUM_ACTIONS = 4
 NUM_STATE = 8
 HIDDEN_SIZE = 256
-ENTROPY_LOSS = 5 * 1e-3 # Does not converge without entropy penalty
+NUM_LAYERS = 3
+ENTROPY_LOSS = 1e-3
 LR = 1e-4 # Lower lr stabilises training greatly
 
 DUMMY_ACTION, DUMMY_VALUE = np.zeros((1, NUM_ACTIONS)), np.zeros((1, 1))
@@ -41,11 +42,10 @@ def exponential_average(old, new, b1):
 
 def proximal_policy_optimization_loss(advantage, old_prediction):
     def loss(y_true, y_pred):
-        prob = K.sum(y_true * y_pred)
-        old_prob = K.sum(y_true * old_prediction)
+        prob = K.sum(y_true * y_pred, axis=-1)
+        old_prob = K.sum(y_true * old_prediction, axis=-1)
         r = prob/(old_prob + 1e-10)
-
-        return -K.mean(K.minimum(r * advantage, K.clip(r, min_value=1 - LOSS_CLIPPING, max_value=1 + LOSS_CLIPPING) * advantage)) + ENTROPY_LOSS * (prob * K.log(prob + 1e-10))
+        return -K.mean(K.minimum(r * advantage, K.clip(r, min_value=1 - LOSS_CLIPPING, max_value=1 + LOSS_CLIPPING) * advantage) + ENTROPY_LOSS * (prob * K.log(prob + 1e-10)))
     return loss
 
 
@@ -80,19 +80,28 @@ class Agent:
         self.val = False
         self.reward = []
         self.reward_over_time = []
-        self.writer = SummaryWriter('AllRuns/continuous/lunar_lander_v2_no_dropout')
+        self.name = self.get_name()
+        self.writer = SummaryWriter(self.name)
         self.gradient_steps = 0
 
-    def build_actor(self):
+    def get_name(self):
+        name = 'AllRuns/'
+        if CONTINUOUS is True:
+            name += 'continous/'
+        else:
+            name += 'discrete/'
+        name += ENV
+        return name
 
+
+    def build_actor(self):
         state_input = Input(shape=(NUM_STATE,))
         advantage = Input(shape=(1,))
         old_prediction = Input(shape=(NUM_ACTIONS,))
 
-        x = Dense(HIDDEN_SIZE, activation='relu')(state_input)
-        x = Dropout(0.5)(x)
-        x = Dense(HIDDEN_SIZE, activation='relu')(x)
-        x = Dropout(0.5)(x)
+        x = Dense(HIDDEN_SIZE, activation='tanh')(state_input)
+        for _ in range(NUM_LAYERS - 1):
+            x = Dense(HIDDEN_SIZE, activation='tanh')(x)
 
         out_actions = Dense(NUM_ACTIONS, activation='softmax', name='output')(x)
 
@@ -110,8 +119,9 @@ class Agent:
         advantage = Input(shape=(1,))
         old_prediction = Input(shape=(NUM_ACTIONS,))
 
-        x = Dense(HIDDEN_SIZE, activation='relu')(state_input)
-        x = Dense(HIDDEN_SIZE, activation='relu')(x)
+        x = Dense(HIDDEN_SIZE, activation='tanh')(state_input)
+        for _ in range(NUM_LAYERS - 1):
+            x = Dense(HIDDEN_SIZE, activation='tanh')(x)
 
         out_actions = Dense(NUM_ACTIONS, name='output', activation='tanh')(x)
 
@@ -127,10 +137,9 @@ class Agent:
     def build_critic(self):
 
         state_input = Input(shape=(NUM_STATE,))
-        x = Dense(HIDDEN_SIZE, activation='relu')(state_input)
-        x = Dropout(0.5)(x)
-        x = Dense(HIDDEN_SIZE, activation='relu')(x)
-        x = Dropout(0.5)(x)
+        x = Dense(HIDDEN_SIZE, activation='tanh')(state_input)
+        for _ in range(NUM_LAYERS - 1):
+            x = Dense(HIDDEN_SIZE, activation='tanh')(x)
 
         out_value = Dense(1)(x)
 
@@ -151,12 +160,9 @@ class Agent:
     def get_action(self):
         p = self.actor.predict([self.observation.reshape(1, NUM_STATE), DUMMY_VALUE, DUMMY_ACTION])
         if self.val is False:
-            if random.random() < .4:
-                action = random.randint(0, NUM_ACTIONS - 1)
-            else:
-                action = np.argmax(np.nan_to_num(p[0]))
+            action = np.random.choice(NUM_ACTIONS, p=p[0])
         else:
-            action = np.argmax(np.nan_to_num(p[0]))
+            action = np.argmax(p[0])
         action_matrix = np.zeros(NUM_ACTIONS)
         action_matrix[action] = 1
         return action, action_matrix, p
@@ -181,7 +187,7 @@ class Agent:
         batch = [[], [], [], []]
 
         tmp_batch = [[], [], []]
-        while len(batch[0]) < BATCH_SIZE:
+        while len(batch[0]) < BUFFER_SIZE:
             if CONTINUOUS is False:
                 action, action_matrix, predicted_action = self.get_action()
             else:
@@ -196,13 +202,14 @@ class Agent:
 
             if done:
                 self.transform_reward()
-                for i in range(len(tmp_batch[0])):
-                    obs, action, pred = tmp_batch[0][i], tmp_batch[1][i], tmp_batch[2][i]
-                    r = self.reward[i]
-                    batch[0].append(obs)
-                    batch[1].append(action)
-                    batch[2].append(pred)
-                    batch[3].append(r)
+                if self.val is False:
+                    for i in range(len(tmp_batch[0])):
+                        obs, action, pred = tmp_batch[0][i], tmp_batch[1][i], tmp_batch[2][i]
+                        r = self.reward[i]
+                        batch[0].append(obs)
+                        batch[1].append(action)
+                        batch[2].append(pred)
+                        batch[3].append(r)
                 tmp_batch = [[], [], []]
                 self.reset_env()
 
@@ -213,18 +220,16 @@ class Agent:
     def run(self):
         while self.episode < EPISODES:
             obs, action, pred, reward = self.get_batch()
+            obs, action, pred, reward = obs[:BUFFER_SIZE], action[:BUFFER_SIZE], pred[:BUFFER_SIZE], reward[:BUFFER_SIZE]
             old_prediction = pred
             pred_values = self.critic.predict(obs)
 
             advantage = reward - pred_values
-
-            actor_loss = []
-            critic_loss = []
-            for e in range(EPOCHS):
-                actor_loss.append(self.actor.train_on_batch([obs, advantage, old_prediction], [action]))
-                critic_loss.append(self.critic.train_on_batch([obs], [reward]))
-            self.writer.add_scalar('Actor loss', np.mean(actor_loss), self.gradient_steps)
-            self.writer.add_scalar('Critic loss', np.mean(critic_loss), self.gradient_steps)
+            # advantage = (advantage - advantage.mean()) / advantage.std()
+            actor_loss = self.actor.fit([obs, advantage, old_prediction], [action], batch_size=BATCH_SIZE, shuffle=True, epochs=EPOCHS, verbose=False)
+            critic_loss = self.critic.fit([obs], [reward], batch_size=BATCH_SIZE, shuffle=True, epochs=EPOCHS, verbose=False)
+            self.writer.add_scalar('Actor loss', actor_loss.history['loss'][-1], self.gradient_steps)
+            self.writer.add_scalar('Critic loss', critic_loss.history['loss'][-1], self.gradient_steps)
 
             self.gradient_steps += 1
 
