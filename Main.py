@@ -160,7 +160,7 @@ class Agent:
     def get_action(self):
         p = self.actor.predict([self.observation.reshape(1, NUM_STATE), DUMMY_VALUE, DUMMY_ACTION])
         if self.val is False:
-            action = np.random.choice(NUM_ACTIONS, p=p[0])
+            action = np.random.choice(NUM_ACTIONS, p=np.nan_to_num(p[0]))
         else:
             action = np.argmax(p[0])
         action_matrix = np.zeros(NUM_ACTIONS)
