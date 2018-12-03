@@ -27,8 +27,8 @@ BUFFER_SIZE = 256
 BATCH_SIZE = 64
 NUM_ACTIONS = 4
 NUM_STATE = 8
-HIDDEN_SIZE = 256
-NUM_LAYERS = 3
+HIDDEN_SIZE = 128
+NUM_LAYERS = 2
 ENTROPY_LOSS = 1e-3
 LR = 1e-4 # Lower lr stabilises training greatly
 
@@ -42,8 +42,8 @@ def exponential_average(old, new, b1):
 
 def proximal_policy_optimization_loss(advantage, old_prediction):
     def loss(y_true, y_pred):
-        prob = K.sum(y_true * y_pred, axis=-1)
-        old_prob = K.sum(y_true * old_prediction, axis=-1)
+        prob = y_true * y_pred
+        old_prob = y_true * old_prediction
         r = prob/(old_prob + 1e-10)
         return -K.mean(K.minimum(r * advantage, K.clip(r, min_value=1 - LOSS_CLIPPING, max_value=1 + LOSS_CLIPPING) * advantage) + ENTROPY_LOSS * (prob * K.log(prob + 1e-10)))
     return loss
