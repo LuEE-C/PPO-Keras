@@ -23,14 +23,14 @@ NOISE = 1.0 # Exploration noise
 
 GAMMA = 0.99
 
-BUFFER_SIZE = 256
-BATCH_SIZE = 64
+BUFFER_SIZE = 2048
+BATCH_SIZE = 256
 NUM_ACTIONS = 4
 NUM_STATE = 8
 HIDDEN_SIZE = 128
 NUM_LAYERS = 2
-ENTROPY_LOSS = 1e-3
-LR = 1e-4 # Lower lr stabilises training greatly
+ENTROPY_LOSS = 5e-3
+LR = 1e-4  # Lower lr stabilises training greatly
 
 DUMMY_ACTION, DUMMY_VALUE = np.zeros((1, NUM_ACTIONS)), np.zeros((1, 1))
 
@@ -42,8 +42,8 @@ def exponential_average(old, new, b1):
 
 def proximal_policy_optimization_loss(advantage, old_prediction):
     def loss(y_true, y_pred):
-        prob = y_true * y_pred
-        old_prob = y_true * old_prediction
+        prob = K.sum(y_true * y_pred, axis=-1)
+        old_prob = K.sum(y_true * old_prediction, axis=-1)
         r = prob/(old_prob + 1e-10)
         return -K.mean(K.minimum(r * advantage, K.clip(r, min_value=1 - LOSS_CLIPPING, max_value=1 + LOSS_CLIPPING) * advantage) + ENTROPY_LOSS * -(prob * K.log(prob + 1e-10)))
     return loss
@@ -92,7 +92,6 @@ class Agent:
             name += 'discrete/'
         name += ENV
         return name
-
 
     def build_actor(self):
         state_input = Input(shape=(NUM_STATE,))
@@ -160,6 +159,7 @@ class Agent:
     def get_action(self):
         p = self.actor.predict([self.observation.reshape(1, NUM_STATE), DUMMY_VALUE, DUMMY_ACTION])
         if self.val is False:
+
             action = np.random.choice(NUM_ACTIONS, p=np.nan_to_num(p[0]))
         else:
             action = np.argmax(p[0])
@@ -225,7 +225,7 @@ class Agent:
             pred_values = self.critic.predict(obs)
 
             advantage = reward - pred_values
-            # advantage = (advantage - advantage.mean()) / advantage.std()
+
             actor_loss = self.actor.fit([obs, advantage, old_prediction], [action], batch_size=BATCH_SIZE, shuffle=True, epochs=EPOCHS, verbose=False)
             critic_loss = self.critic.fit([obs], [reward], batch_size=BATCH_SIZE, shuffle=True, epochs=EPOCHS, verbose=False)
             self.writer.add_scalar('Actor loss', actor_loss.history['loss'][-1], self.gradient_steps)
